@@ -409,6 +409,7 @@
       <button class="fb" onclick="filterGrid('agbada',this)">Agbada</button>
       <button class="fb" onclick="filterGrid('flap',this)">Flap &amp; Pockets</button>
       <button class="fb" onclick="filterGrid('danshiki',this)">Danshiki</button>
+      <button class="fb" onclick="filterGrid('bodywork',this)">Bodywork</button>
     </div>
   </div>
   <div class="grid" id="grid"></div>
@@ -446,7 +447,7 @@
       </div>
       <div class="fg"><label>Selling Price (₦) *</label><input type="number" id="sPrice" placeholder="e.g. 3500" min="500"/></div>
       <div class="fg"><label>Category *</label>
-        <select id="sCat"><option value="">— Select —</option><option value="agbada">Agbada</option><option value="flap">Flap &amp; Pockets</option><option value="danshiki">Danshiki</option><option value="other">Other</option></select>
+        <select id="sCat"><option value="">— Select —</option><option value="agbada">Agbada</option><option value="flap">Flap &amp; Pockets</option><option value="danshiki">Danshiki</option><option value="bodywork">Bodywork</option><option value="other">Other</option></select>
       </div>
       <div class="fg full"><label>Available Formats *</label>
         <div class="fmt-checks">
@@ -604,7 +605,7 @@
       <div class="mfg"><label>Description * — garment, stitch type, fabric recommendation</label><textarea id="editDesc" placeholder="Describe the design..."></textarea></div>
       <div class="mfg-row">
         <div class="mfg"><label>Price (₦) *</label><input type="number" id="editPrice" placeholder="e.g. 6500" min="100"/></div>
-        <div class="mfg"><label>Category *</label><select id="editCat"><option value="agbada">Agbada</option><option value="flap">Flap &amp; Pockets</option><option value="danshiki">Danshiki</option></select></div>
+        <div class="mfg"><label>Category *</label><select id="editCat"><option value="agbada">Agbada</option><option value="flap">Flap &amp; Pockets</option><option value="danshiki">Danshiki</option><option value="bodywork">Bodywork</option></select></div>
       </div>
       <div class="mfg-row">
         <div class="mfg"><label>Badge</label><select id="editBadge"><option value="">None</option><option value="popular">🔥 Popular</option><option value="new">✨ New</option></select></div>
@@ -662,7 +663,24 @@ const PS_KEY     = 'pk_test_4ed261377b7d3365a4a946ba0d363ca26f0dbf65';
 
 /* Storage */
 const load = k => { try{ const s=localStorage.getItem(k); return s?JSON.parse(s):null; }catch(e){ return null; } };
-const save = (k,v) => { try{ localStorage.setItem(k,JSON.stringify(v)); }catch(e){} };
+const save = (k,v) => { localStorage.setItem(k,JSON.stringify(v)); }; // throws on quota
+function isQuota(e){ return e && (e.name==='QuotaExceededError'||e.code===22||/quota/i.test(e.message||'')); }
+// Persist list; if over quota, drop heavy fileData/img from newest records until it fits.
+function safeSaveList(key,list){
+  try{ save(key,list); return {ok:true}; }
+  catch(e){
+    if(!isQuota(e)) throw e;
+    const trimmed=list.map(x=>({...x}));
+    // Drop fileData first (largest), then base64 images, newest-first
+    for(let i=trimmed.length-1;i>=0;i--){
+      if(trimmed[i].fileData){ trimmed[i].fileData=null; try{ save(key,trimmed); return {ok:true,dropped:'file'}; }catch(e2){ if(!isQuota(e2)) throw e2; } }
+    }
+    for(let i=trimmed.length-1;i>=0;i--){
+      if(trimmed[i].img && String(trimmed[i].img).startsWith('data:')){ trimmed[i].img=''; try{ save(key,trimmed); return {ok:true,dropped:'image'}; }catch(e2){ if(!isQuota(e2)) throw e2; } }
+    }
+    return {ok:false};
+  }
+}
 
 function defProds(){ return [
   {id:1,name:"Grand Agbada Collar Design",desc:"Majestic large collar embroidery for senator & agbada necklines. Rich satin stitch with layered fill detail. Ideal for ASO-OKE, guinea brocade and similar premium fabrics.",price:6500,cat:"agbada",badge:"popular",formats:["EMB","DST","PES","JEF"],seller:"Keem Studio",hoop:"5×7 inch",stitch:"18,400",colors:"8",img:"https://images.unsplash.com/photo-1529139574466-a303027c1d8b?w=600&h=420&fit=crop",fileName:"agbada-collar.zip",fileData:null},
@@ -886,11 +904,16 @@ function submitSeller(){
   if(!embF){ toast('⚠ Upload the embroidery file'); return; }
   if(!bank){ toast('⚠ Enter bank account for payouts'); return; }
   rb64(imgF,imgD=>{ rb64(embF,fileD=>{
-    PENDING.push({id:Date.now(),name:dname,desc,price:Number(price),cat,badge:'new',formats:fmts,seller:name,email,phone,bank,hoop,stitch,colors,img:imgD,fileName:embF.name,fileData:fileD,at:new Date().toLocaleString()});
-    save('keemPending',PENDING);
+    const entry={id:Date.now(),name:dname,desc,price:Number(price),cat,badge:'new',formats:fmts,seller:name,email,phone,bank,hoop,stitch,colors,img:imgD,fileName:embF.name,fileData:fileD,at:new Date().toLocaleString()};
+    PENDING.push(entry);
+    const r=safeSaveList('keemPending',PENDING);
+    if(!r.ok){ PENDING.pop(); toast('❌ File too large to save in browser. Try a smaller file (<4MB).'); return; }
+    PENDING=load('keemPending')||PENDING;
     document.getElementById('sellWrap').style.display='none';
     document.getElementById('sellDone').classList.add('show');
-    toast('✅ Design submitted!');
+    toast(r.dropped==='file' ? '✅ Submitted — file too large to store, admin will contact you'
+        : r.dropped==='image' ? '✅ Submitted — image too large to store'
+        : '✅ Design submitted & saved!');
   }); });
 }
 function resetSellForm(){
@@ -931,13 +954,17 @@ function renderAdmin(){
 function approve(id){
   const s=PENDING.find(x=>x.id===id); if(!s) return;
   const nid=PRODS.length?Math.max(...PRODS.map(p=>p.id))+1:1;
-  PRODS.push({id:nid,name:s.name,desc:s.desc,price:s.price,cat:s.cat,badge:'new',formats:s.formats,seller:s.seller,hoop:s.hoop,stitch:s.stitch,colors:s.colors,img:s.img,fileName:s.fileName,fileData:s.fileData});
+  const newProd={id:nid,name:s.name,desc:s.desc,price:s.price,cat:s.cat,badge:'new',formats:s.formats,seller:s.seller,hoop:s.hoop,stitch:s.stitch,colors:s.colors,img:s.img,fileName:s.fileName,fileData:s.fileData};
+  PRODS.push(newProd);
+  const r=safeSaveList('keemProducts',PRODS);
+  if(!r.ok){ PRODS.pop(); toast('❌ Could not save — storage full.'); return; }
+  PRODS=load('keemProducts')||PRODS;
   PENDING=PENDING.filter(x=>x.id!==id);
-  save('keemProducts',PRODS); save('keemPending',PENDING);
+  safeSaveList('keemPending',PENDING);
   renderGrid(activeCat); renderAdmin();
-  toast('✅ "'+s.name+'" approved and live!');
+  toast('✅ "'+s.name+'" approved — now live in the store!');
 }
-function reject(id){ PENDING=PENDING.filter(x=>x.id!==id); save('keemPending',PENDING); renderAdmin(); toast('Submission rejected.'); }
+function reject(id){ PENDING=PENDING.filter(x=>x.id!==id); safeSaveList('keemPending',PENDING); renderAdmin(); toast('Submission rejected.'); }
 
 function openAddModal(){
   editMode=false;
@@ -989,16 +1016,24 @@ function saveProduct(){
   if(!fmts.length){ toast('⚠ Select at least one format'); return; }
   const defs={agbada:'https://images.unsplash.com/photo-1529139574466-a303027c1d8b?w=600&h=420&fit=crop',flap:'https://images.unsplash.com/photo-1594938298603-c8148c4b4e43?w=600&h=420&fit=crop',danshiki:'https://images.unsplash.com/photo-1590735213920-68192a487bc2?w=600&h=420&fit=crop'};
   const doSave=(imgD,fileD,fileN)=>{
+    const snapshot=PRODS.slice();
+    let msg='';
     if(editMode){
       const id=parseInt(document.getElementById('editId').value);
       const idx=PRODS.findIndex(p=>p.id===id);
-      if(idx>-1){ PRODS[idx]={...PRODS[idx],name,desc,price,cat,badge,formats:fmts,seller,hoop,stitch,colors,img:imgD||PRODS[idx].img,fileName:fileN||PRODS[idx].fileName,fileData:fileD||PRODS[idx].fileData}; toast('✅ Updated!'); }
+      if(idx>-1){ PRODS[idx]={...PRODS[idx],name,desc,price,cat,badge,formats:fmts,seller,hoop,stitch,colors,img:imgD||PRODS[idx].img,fileName:fileN||PRODS[idx].fileName,fileData:fileD||PRODS[idx].fileData}; msg='✅ Product updated & saved!'; }
     } else {
       const nid=PRODS.length?Math.max(...PRODS.map(p=>p.id))+1:1;
       PRODS.push({id:nid,name,desc,price,cat,badge,formats:fmts,seller,hoop,stitch,colors,img:imgD||imgUrl||defs[cat]||defs.agbada,fileName:fileN||name+'.zip',fileData:fileD});
-      toast('✅ Product added!');
+      msg='✅ Product added & saved to store!';
     }
-    save('keemProducts',PRODS); closeEdit(); renderGrid(activeCat); renderAdmin();
+    const r=safeSaveList('keemProducts',PRODS);
+    if(!r.ok){ PRODS=snapshot; toast('❌ Could not save — file too large. Use a smaller file or paste an image URL.'); return; }
+    PRODS=load('keemProducts')||PRODS;
+    if(r.dropped==='file') msg='⚠ Saved without the embroidery file (too large for browser storage).';
+    else if(r.dropped==='image') msg='⚠ Saved without the uploaded image (too large). Paste an image URL instead.';
+    toast(msg);
+    closeEdit(); renderGrid(activeCat); renderAdmin();
   };
   const rImg=cb=>{ if(imgFIn.files[0]){ rb64(imgFIn.files[0],d=>cb(d)); } else cb(imgUrl||null); };
   const rFile=cb=>{ if(fileFIn.files[0]){ rb64(fileFIn.files[0],d=>cb(d,fileFIn.files[0].name)); } else cb(null,null); };
@@ -1010,7 +1045,7 @@ function closeConf(){ delId=null; document.getElementById('confWrap').classList.
 function confirmDel(){
   if(!delId) return;
   PRODS=PRODS.filter(p=>p.id!==delId); cart=cart.filter(c=>c.id!==delId);
-  save('keemProducts',PRODS); syncCart(); renderGrid(activeCat); renderAdmin(); closeConf();
+  safeSaveList('keemProducts',PRODS); syncCart(); renderGrid(activeCat); renderAdmin(); closeConf();
   toast('🗑 Product deleted.');
 }
 
